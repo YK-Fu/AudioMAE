@@ -1,0 +1,115 @@
+defaults:
+  - .@model.encoder: megatron_model_base_config
+  - .@model.decoder: megatron_model_base_config
+
+name: megatron_audio_mae
+restore_from_path: null # used when starting from a .nemo file
+
+trainer:
+  devices: 1
+  num_nodes: 1
+  accelerator: gpu
+  precision: 16
+  logger: False # logger provided by exp_manager
+  enable_checkpointing: False
+  use_distributed_sampler: False
+  max_epochs: -1 # PTL default. In practice, max_steps will be reached first. 
+  max_steps: 100000 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  log_every_n_steps: 10
+  val_check_interval: 100
+  limit_val_batches: 50
+  limit_test_batches: 500
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  benchmark: False
+
+exp_manager:
+  explicit_log_dir: null
+  exp_dir: null
+  name: ${name}
+  create_wandb_logger: False
+  wandb_logger_kwargs:
+    project: null
+    name: null
+  resume_if_exists: True
+  resume_ignore_no_checkpoint: True
+  create_checkpoint_callback: True
+  checkpoint_callback_params:
+    monitor: val_loss
+    save_top_k: 10
+    mode: min
+    always_save_nemo: False # saves nemo file during validation, not implemented for model parallel
+    filename: '${name}--{val_loss:.2f}-{step}-{consumed_samples}'
+    model_parallel_size: ${multiply:${model.tensor_model_parallel_size}, ${model.pipeline_model_parallel_size}}
+
+model:
+  # use audio mae from mcore, not implemented now
+  mcore_mae: False
+  transformer_engine: False
+
+  # model parallelism 
+  micro_batch_size: 4
+  global_batch_size: 8 # will use more micro batches to reach global batch size
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  resume_from_checkpoint: null # manually set the checkpoint file to load from
+  pipeline_model_parallel_split_rank: 0 # rank at which decoder starts.
+
+  # model architecture
+  megatron_amp_O2: False # use AMP with O2 style mixed precision instead of native amp on-the-fly weight autocasting.
+  grad_allreduce_chunk_size_mb: 125
+  grad_div_ar_fusion: True # Fuse grad division into torch.distributed.all_reduce
+  gradient_as_bucket_view: True # Allocate gradients in a contiguous bucket to save memory (less fragmentation and buffer memory)
+
+  encoder_seq_length: 1024
+  max_position_embeddings: ${.encoder_seq_length}
+
+  # precision
+  native_amp_init_scale: 4294967296 # 2 ** 32
+  native_amp_growth_interval: 1000
+
+  # miscellaneous
+  seed: 1234
+  use_cpu_initialization: False # Init weights on the CPU (slow for large models)
+  apex_transformer_log_level: 30 # Python logging level displays logs with severity greater than or equal to this
+  seq_length: 1024
+  patch_size: 16
+  mask_prob: 0.5
+  data:
+    # Path to image dataset must be specified by the user.
+    # Supports List
+    # List: can override from the CLI: "model.data.data_prefix=[/path/to/train, /path/to/val]",
+    data_path: /bcp/workspaces/hackathon/data
+    data_prefix: {'train': 'train', 'valid': 'valid', 'test': 'valid'}
+    mel_bins: 128
+    target_length: 1024
+    num_workers: 1
+    dataloader_type: cyclic # cyclic
+    validation_drop_last: True # Set to false if the last partial validation samples is to be consumed
+    data_sharding: False
+
+  # Nsys profiling options
+  nsys_profile:
+    enabled: False
+    start_step: 10  # Global batch to start profiling
+    end_step: 10 # Global batch to end profiling
+    ranks: [ 0 ] # Global rank IDs to profile
+    gen_shape: False # Generate model and kernel details including input shapes
+
+  optim:
+    name: fused_adam
+    lr: 0.001
+    betas:
+      - 0.9
+      - 0.999
+    eps: 1e-8
+    weight_decay: 0.01
+    sched:
+      name: WarmupAnnealing
+      min_lr: 0.00001
+      last_epoch: -1
+      warmup_ratio: 0.01
+  encoder:
+    precision: ${trainer.precision}
+  decoder:
+    precision: ${trainer.precision}
